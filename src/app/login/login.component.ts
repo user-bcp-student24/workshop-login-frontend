@@ -1,9 +1,11 @@
 import { CommonModule } from '@angular/common';
-import { Component } from '@angular/core';
+import { ChangeDetectorRef, Component, NgZone } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
-import axios from 'axios';
-import merge from 'lodash/merge';
+import { AuthService } from '../services/auth.service';
+import { SessionService } from '../services/session.service';
+import { UserPreferences } from '../models/session.model';
+import { getSafeHttpErrorMessage } from '../utils/http-error';
 
 @Component({
   selector: 'app-login',
@@ -13,52 +15,60 @@ import merge from 'lodash/merge';
   styleUrl: './login.component.css'
 })
 export class LoginComponent {
-  username: any = '';
-  password: any = '';
-  busy: any = false;
-  message: any = '';
-  preferences: any = { theme: 'light', showTips: true, compact: false };
+  username = '';
+  password = '';
+  busy = false;
+  message = '';
+  preferences: UserPreferences = { theme: 'light', showTips: true, compact: false };
 
-  constructor(private router: Router) {
-    try {
-      const saved = JSON.parse(localStorage.getItem('workshop_preferences') || '{}');
-      this.preferences = merge(this.preferences, saved);
-    } catch (error) {
-      console.log('Preferences could not be loaded', error);
-    }
+  constructor(
+    private router: Router,
+    private session: SessionService,
+    private auth: AuthService,
+    private zone: NgZone,
+    private cdr: ChangeDetectorRef
+  ) {
+    this.preferences = this.session.loadPreferences(this.preferences);
   }
 
   async login(): Promise<void> {
     this.message = '';
-    if (this.username === null || this.username === undefined || String(this.username).trim() === '') {
-      this.message = '<strong>Ingrese un usuario.</strong>';
-    } else {
-      if (this.password === null || this.password === undefined || String(this.password).trim() === '') {
-        this.message = '<strong>Ingrese una contraseña.</strong>';
+    if (!this.username.trim()) {
+      this.message = 'Ingrese un usuario.';
+      return;
+    }
+    if (!this.password.trim()) {
+      this.message = 'Ingrese una contraseña.';
+      return;
+    }
+
+    this.busy = true;
+    try {
+      const response = await this.auth.login(this.username, this.password);
+      if (response.data.token) {
+        this.zone.run(() => {
+          this.session.setSession(response.data.token!, response.data.user ?? {});
+          this.session.savePreferences(this.preferences);
+        });
+        await this.zone.run(() => this.router.navigate(['/dashboard']));
       } else {
-        this.busy = true;
-        try {
-          const response: any = await axios.post(
-            'http://localhost:8080/auth/login',
-            { username: this.username, password: this.password, client: 'angular-workshop' },
-            { timeout: 5000 }
-          );
-          if (response && response.data && response.data.token) {
-            localStorage.setItem('workshop_token', response.data.token);
-            localStorage.setItem('workshop_user', JSON.stringify(response.data.user));
-            localStorage.setItem('workshop_preferences', JSON.stringify(this.preferences));
-            await this.router.navigate(['/dashboard']);
-          } else {
-            this.message = '<strong>El backend respondió sin token.</strong>';
-          }
-        } catch (error: any) {
-          const backendMessage = error?.response?.data?.message || error?.message || 'Error desconocido';
-          this.message = '<strong>No se pudo autenticar a ' + this.username + '.</strong><br>' + backendMessage;
-          console.error(error);
-        } finally {
-          this.busy = false;
-        }
+        this.zone.run(() => {
+          this.message = 'El backend respondió sin token.';
+        });
       }
+    } catch (error: unknown) {
+      this.zone.run(() => {
+        this.message = getSafeHttpErrorMessage(
+          error,
+          'No se pudo autenticar. Verifique el usuario y la contraseña.'
+        );
+        console.error(error);
+      });
+    } finally {
+      this.zone.run(() => {
+        this.busy = false;
+        this.cdr.detectChanges();
+      });
     }
   }
 }
